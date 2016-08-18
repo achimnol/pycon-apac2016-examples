@@ -17,7 +17,7 @@ import uvloop
 
 repeat = 30
 trials = 10
-backlog = 256
+backlog = 5
 payload_sz = None
 message = None
 
@@ -46,6 +46,8 @@ class EchoServerHandler(socketserver.BaseRequestHandler):
             remaining -= len(data[-1])
         for d in data:
             self.request.sendall(d)
+        assert b'' == self.request.recv(1)
+        self.request.close()
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     pass
@@ -73,7 +75,7 @@ class ThreadedServerProcess(multiprocessing.Process):
         self.cpu = cpu
 
     def run(self):
-        #os.sched_setaffinity(self.pid, [self.cpu])
+        os.sched_setaffinity(self.pid, [self.cpu])
         server = ThreadedTCPServer(('127.0.0.1', 8888), EchoServerHandler, bind_and_activate=False)
         server.request_queue_size = backlog
         server.allow_reuse_address = True
@@ -81,6 +83,7 @@ class ThreadedServerProcess(multiprocessing.Process):
         server.server_bind()
         server.server_activate()
         server.serve_forever()
+
 
 class AsyncCoroServerProcess(multiprocessing.Process):
 
@@ -139,16 +142,16 @@ class SequentialClientProcess(multiprocessing.Process):
         os.sched_setaffinity(self.pid, [self.cpu])
         time.sleep(0.01)
         for _ in range(repeat):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(('127.0.0.1', 8888))
-            sock.sendall(message)
-            remaining = payload_sz
-            data = []
-            while remaining > 0:
-                data.append(sock.recv(payload_sz))
-                remaining -= len(data[-1])
-            assert b''.join(data) == message
-            sock.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.connect(('127.0.0.1', 8888))
+                sock.sendall(message)
+                remaining = payload_sz
+                data = []
+                while remaining > 0:
+                    data.append(sock.recv(payload_sz))
+                    remaining -= len(data[-1])
+                sock.shutdown(socket.SHUT_RDWR)
 
 
 def run(server_proc_cls, num_servers, client_proc_cls, num_clients):
@@ -158,13 +161,14 @@ def run(server_proc_cls, num_servers, client_proc_cls, num_clients):
         client_procs = []
         for i in range(num_servers):
             server = server_proc_cls(cpu=i)
+            server.daemon = True
             server_procs.append(server)
             server.start()
+        t_start = time.monotonic()
         for i in range(num_clients):
             client = client_proc_cls(cpu=num_servers + i)
             client_procs.append(client)
             client.start()
-        t_start = time.monotonic()
         for client in client_procs:
             client.join()
         t_end = time.monotonic()
@@ -172,22 +176,24 @@ def run(server_proc_cls, num_servers, client_proc_cls, num_clients):
             server.terminate()
         for server in server_procs:
             server.join()
-        t.append(t_end - t_start)
+        t.append(t_end - t_start - 0.01)
     print('{0}[{1}] <=> {2}[{3}] - '.format(server_proc_cls.__name__, num_servers, client_proc_cls.__name__, num_clients), end='')
     print('Elapsed time: avg {:.6f} sec. (min/max {:.6f}/{:.6f})'.format(mean(t), min(t), max(t)))
 
 
 if __name__ == '__main__':
+    # Apply uvloop.
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    #for payload_sz in [128, 512, 1024, 2048]:
+
+    for payload_sz in [128, 512, 1024, 2048]:
     #for payload_sz in [4096, 8192, 16384]:
-    for payload_sz in [262144, 524288]:
+    #for payload_sz in [262144, 524288]:
     #for payload_sz in [1048576]:
         message = b'*' * payload_sz
         print('payload_sz: {:,} bytes'.format(payload_sz))
         run(SequentialServerProcess, 1, SequentialClientProcess, 3)
         run(ThreadedServerProcess, 1, SequentialClientProcess, 3)
-        run(AsyncCoroServerProcess, 1, SequentialClientProcess, 3)
-        run(AsyncProtoServerProcess, 1, SequentialClientProcess, 3)
+        #run(AsyncCoroServerProcess, 1, SequentialClientProcess, 3)
+        #run(AsyncProtoServerProcess, 1, SequentialClientProcess, 3)
 
 # vim: sts=4 sw=4 et
